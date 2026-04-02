@@ -1,0 +1,8 @@
+[Unit]
+Description=Check Tempo timesheet and nag if incomplete
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/python3 __SCRIPT_DIR__/timesheet_nag.py
+PassEnvironment=DISPLAY DBUS_SESSION_BUS_ADDRESS
+Environment=DISPLAY=:0
