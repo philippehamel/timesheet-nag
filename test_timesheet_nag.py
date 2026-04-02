@@ -95,6 +95,34 @@ class TestFetchLoggedHours:
         assert hours == 40.0
         assert mock_get.call_count == 2
 
+    @patch("timesheet_nag.requests.get")
+    def test_rejects_spoofed_subdomain(self, mock_get: MagicMock) -> None:
+        page1 = MagicMock()
+        page1.json.return_value = {
+            "results": [{"timeSpentSeconds": 3600 * 20}],
+            "metadata": {"next": "https://api.tempo.io.evil.com/4/worklogs?offset=1"},
+        }
+        page1.raise_for_status = MagicMock()
+        mock_get.return_value = page1
+
+        hours = timesheet_nag.fetch_logged_hours("tok", "acc", "2026-03-23", "2026-03-29")
+        assert hours == 20.0
+        assert mock_get.call_count == 1
+
+    @patch("timesheet_nag.requests.get")
+    def test_rejects_http_downgrade(self, mock_get: MagicMock) -> None:
+        page1 = MagicMock()
+        page1.json.return_value = {
+            "results": [{"timeSpentSeconds": 3600 * 20}],
+            "metadata": {"next": "http://api.tempo.io/4/worklogs?offset=1"},
+        }
+        page1.raise_for_status = MagicMock()
+        mock_get.return_value = page1
+
+        hours = timesheet_nag.fetch_logged_hours("tok", "acc", "2026-03-23", "2026-03-29")
+        assert hours == 20.0
+        assert mock_get.call_count == 1
+
 
 class TestFetchApprovalStatus:
     @patch("timesheet_nag.requests.get")
@@ -128,21 +156,35 @@ class TestIsTimesheetComplete:
 
 
 class TestShowNagPopup:
-    def test_shows_warning(self) -> None:
+    def test_shows_custom_window(self) -> None:
         mock_tk = MagicMock()
         mock_root = MagicMock()
         mock_tk.Tk.return_value = mock_root
 
-        with patch.dict("sys.modules", {"tkinter": mock_tk, "tkinter.messagebox": mock_tk.messagebox}):
+        with patch.dict("sys.modules", {"tkinter": mock_tk}):
             timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
 
-        mock_tk.messagebox.showwarning.assert_called_once()
-        title, message = mock_tk.messagebox.showwarning.call_args[0]
-        assert title == "FILL YOUR TIMESHEET!"
-        assert "32.5" in message
-        assert "40.0" in message
-        assert "2026-03-23" in message
-        mock_root.destroy.assert_called_once()
+        mock_root.overrideredirect.assert_called_once_with(True)
+        mock_root.attributes.assert_called_once_with("-topmost", True)
+        mock_root.configure.assert_called_once_with(bg="#FFFFFF")
+        label_calls = mock_tk.Label.call_args_list
+        assert len(label_calls) == 2
+        title_call = label_calls[0]
+        assert "FILL YOUR TIMESHEET!" in title_call[1]["text"]
+        assert title_call[1]["font"] == ("Consolas", 28, "bold")
+        assert title_call[1]["fg"] == "#FFFF55"
+        assert title_call[1]["bg"] == "#0000AA"
+        message_call = label_calls[1]
+        assert "32.5" in message_call[1]["text"]
+        assert "2026-03-23" in message_call[1]["text"]
+        assert message_call[1]["font"] == ("Consolas", 14)
+        assert message_call[1]["fg"] == "#FFFFFF"
+        assert message_call[1]["bg"] == "#0000AA"
+        mock_tk.Button.assert_called_once()
+        btn_call = mock_tk.Button.call_args[1]
+        assert btn_call["text"] == "[ OK ]"
+        assert btn_call["relief"] == "flat"
+        mock_root.mainloop.assert_called_once()
 
     def test_notify_send_fallback(self) -> None:
         mock_result = MagicMock()
@@ -159,7 +201,10 @@ class TestShowNagPopup:
     def test_notify_send_failure_falls_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
         with patch.dict("sys.modules", {"tkinter": None}):
             with patch("subprocess.run", side_effect=FileNotFoundError):
-                timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+                with patch("timesheet_nag.sys") as mock_sys:
+                    mock_sys.platform = "linux"
+                    mock_sys.stderr = __import__("sys").stderr
+                    timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
         err = capsys.readouterr().err
         assert "falling back to stderr" in err
         assert "32.5" in err
@@ -170,22 +215,53 @@ class TestShowNagPopup:
         mock_result.returncode = 1
         with patch.dict("sys.modules", {"tkinter": None}):
             with patch("subprocess.run", return_value=mock_result):
-                timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+                with patch("timesheet_nag.sys") as mock_sys:
+                    mock_sys.platform = "linux"
+                    mock_sys.stderr = __import__("sys").stderr
+                    timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
         err = capsys.readouterr().err
         assert "falling back to stderr" in err
         assert "32.5" in err
 
-    def test_root_destroyed(self) -> None:
+    def test_osascript_fallback_on_macos(self) -> None:
+        def run_side_effect(cmd, **kwargs):
+            if cmd[0] == "notify-send":
+                raise FileNotFoundError
+            mock_result = MagicMock()
+            mock_result.returncode = 0
+            return mock_result
+
+        with patch.dict("sys.modules", {"tkinter": None}):
+            with patch("subprocess.run", side_effect=run_side_effect) as mock_run:
+                with patch("timesheet_nag.sys") as mock_sys:
+                    mock_sys.platform = "darwin"
+                    mock_sys.stderr = __import__("sys").stderr
+                    timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+        osascript_calls = [c for c in mock_run.call_args_list if c[0][0][0] == "osascript"]
+        assert len(osascript_calls) == 1
+        assert "FILL YOUR TIMESHEET!" in osascript_calls[0][0][0][2]
+
+    def test_osascript_skipped_on_linux(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch.dict("sys.modules", {"tkinter": None}):
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                with patch("timesheet_nag.sys") as mock_sys:
+                    mock_sys.platform = "linux"
+                    mock_sys.stderr = __import__("sys").stderr
+                    timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+        err = capsys.readouterr().err
+        assert "falling back to stderr" in err
+
+    def test_window_configured_topmost(self) -> None:
         mock_tk = MagicMock()
         mock_root = MagicMock()
         mock_tk.Tk.return_value = mock_root
 
-        with patch.dict("sys.modules", {"tkinter": mock_tk, "tkinter.messagebox": mock_tk.messagebox}):
+        with patch.dict("sys.modules", {"tkinter": mock_tk}):
             timesheet_nag.show_nag_popup(40.0, "APPROVED", "2026-03-23", "2026-03-29")
 
-        mock_root.withdraw.assert_called_once()
+        mock_root.overrideredirect.assert_called_once_with(True)
         mock_root.attributes.assert_called_once_with("-topmost", True)
-        mock_root.destroy.assert_called_once()
+        mock_root.mainloop.assert_called_once()
 
 
 class TestMain:
@@ -318,11 +394,10 @@ class TestDryRun:
         timesheet_nag.main(["--dry-run"])
         mock_hours.assert_not_called()
         mock_status.assert_not_called()
-        mock_popup.assert_not_called()
+        mock_popup.assert_called_once()
         output = capsys.readouterr().out
         assert "[dry-run]" in output
         assert "acc***" in output
-        assert "Would fetch worklogs" in output
 
     @patch("timesheet_nag.time.sleep")
     @patch("timesheet_nag.show_nag_popup")

@@ -39,7 +39,7 @@ Each platform has its own installer that schedules the script to run every Monda
 ### Linux (systemd)
 
 ```bash
-./install.sh
+./install_linux.sh
 systemctl --user status timesheet-nag.timer
 ```
 
@@ -56,6 +56,11 @@ launchctl list | grep timesheet
 install_windows.bat
 schtasks /query /tn "TimesheetNag"
 ```
+
+> **Note:** The scheduled task fires once on Monday at 9:00 AM and the Python process
+> loops every 5 minutes until the timesheet is complete. If the machine reboots during
+> the day, the task will not re-trigger until the following Monday. You can manually
+> re-run `python timesheet_nag.py` if needed.
 
 ## Uninstall
 

@@ -6,7 +6,7 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 PLIST_PATH="$LAUNCH_AGENTS_DIR/$PLIST_NAME"
 
 if [ -f "$PLIST_PATH" ]; then
-    launchctl unload "$PLIST_PATH" 2>/dev/null || true
+    launchctl bootout "gui/$(id -u)/com.timesheet-nag" 2>/dev/null || true
     rm -f "$PLIST_PATH"
     echo "Uninstalled timesheet-nag launch agent."
 else

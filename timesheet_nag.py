@@ -5,6 +5,7 @@ import sys
 import time
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import urlparse
 
 import requests
 
@@ -62,9 +63,11 @@ def fetch_logged_hours(token: str, account_id: str, from_date: str, to_date: str
         for worklog in data.get("results", []):
             total_seconds += worklog.get("timeSpentSeconds", 0)
         next_url = data.get("metadata", {}).get("next", None)
-        if next_url and not next_url.startswith("https://api.tempo.io/"):
-            print(f"Warning: ignoring unexpected pagination URL: {next_url}", file=sys.stderr)
-            next_url = None
+        if next_url:
+            parsed = urlparse(next_url)
+            if parsed.scheme != "https" or parsed.hostname != "api.tempo.io":
+                print(f"Warning: ignoring unexpected pagination URL: {next_url}", file=sys.stderr)
+                next_url = None
         url = next_url
         params = {}
     return total_seconds / 3600
@@ -101,13 +104,89 @@ def show_nag_popup(hours: float, status: str, from_date: str, to_date: str) -> N
 
     try:
         import tkinter
-        from tkinter import messagebox
+
+        BG = "#0000AA"
+        FG = "#FFFFFF"
+        YELLOW = "#FFFF55"
+        FONT = ("Consolas", 14)
+        FONT_TITLE = ("Consolas", 28, "bold")
 
         root = tkinter.Tk()
-        root.withdraw()
+        root.overrideredirect(True)
         root.attributes("-topmost", True)
-        messagebox.showwarning("FILL YOUR TIMESHEET!", message)
-        root.destroy()
+        root.configure(bg=FG)
+
+        outer = tkinter.Frame(root, bg=BG, padx=2, pady=2)
+        outer.pack(fill="both", expand=True, padx=2, pady=2)
+
+        inner = tkinter.Frame(outer, bg=BG,
+                              highlightthickness=1, highlightbackground=FG)
+        inner.pack(fill="both", expand=True, padx=4, pady=4)
+
+        tkinter.Label(
+            inner, text=" FILL YOUR TIMESHEET! ",
+            font=FONT_TITLE, fg=YELLOW, bg=BG,
+        ).pack(pady=(16, 8))
+
+        sep = tkinter.Frame(inner, height=1, bg=FG)
+        sep.pack(fill="x", padx=12, pady=4)
+
+        tkinter.Label(
+            inner, text=message, font=FONT, fg=FG, bg=BG,
+            justify="left", anchor="nw",
+        ).pack(padx=20, pady=(8, 12), fill="both", expand=True)
+
+        btn = tkinter.Button(
+            inner, text="[ OK ]", font=FONT, fg=FG, bg=BG,
+            activeforeground="#000000", activebackground=YELLOW,
+            relief="flat", bd=0, padx=24, pady=4, command=root.destroy,
+        )
+        btn.pack(pady=(4, 16))
+        btn.bind("<Enter>", lambda e: btn.configure(fg="#000000", bg=YELLOW))
+        btn.bind("<Leave>", lambda e: btn.configure(fg=FG, bg=BG))
+        btn.bind("<FocusIn>", lambda e: btn.configure(fg="#000000", bg=YELLOW))
+        btn.bind("<FocusOut>", lambda e: btn.configure(fg=FG, bg=BG))
+
+        root.update_idletasks()
+        w, h = 700, 420
+        try:
+            import subprocess as _sp
+            out = _sp.check_output(
+                ["xrandr", "--query"], text=True, stderr=_sp.DEVNULL,
+            )
+            for line in out.splitlines():
+                if " primary " in line:
+                    res = line.split()[3]
+                    pw, rest = res.split("x")
+                    ph = rest.split("+")[0]
+                    ox, oy = rest.split("+")[1], rest.split("+")[2]
+                    x = int(ox) + (int(pw) - w) // 2
+                    y = int(oy) + (int(ph) - h) // 2
+                    break
+            else:
+                raise ValueError
+        except Exception:
+            x = (root.winfo_screenwidth() - w) // 2
+            y = (root.winfo_screenheight() - h) // 2
+        root.geometry(f"{w}x{h}+{x}+{y}")
+
+        def _start_drag(e):
+            root._drag_x = e.x
+            root._drag_y = e.y
+
+        def _do_drag(e):
+            dx = e.x - root._drag_x
+            dy = e.y - root._drag_y
+            nx = root.winfo_x() + dx
+            ny = root.winfo_y() + dy
+            root.geometry(f"+{nx}+{ny}")
+
+        outer.bind("<Button-1>", _start_drag)
+        outer.bind("<B1-Motion>", _do_drag)
+        inner.bind("<Button-1>", _start_drag)
+        inner.bind("<B1-Motion>", _do_drag)
+
+        root.mainloop()
         return
     except Exception:
         pass
@@ -130,6 +209,25 @@ def show_nag_popup(hours: float, status: str, from_date: str, to_date: str) -> N
             return
     except Exception:
         pass
+
+    if sys.platform == "darwin":
+        try:
+            import subprocess
+
+            escaped = message.replace("\\", "\\\\").replace('"', '\\"')
+            result = subprocess.run(
+                [
+                    "osascript",
+                    "-e",
+                    f'display dialog "{escaped}" with title "FILL YOUR TIMESHEET!" with icon caution buttons {{"OK"}} default button "OK"',
+                ],
+                capture_output=True,
+                timeout=60,
+            )
+            if result.returncode == 0:
+                return
+        except Exception:
+            pass
 
     print("Warning: all notification methods failed, falling back to stderr", file=sys.stderr)
     print(message, file=sys.stderr)
@@ -164,10 +262,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[dry-run] Token file: {TOKEN_FILE} (found)")
         print(f"[dry-run] Account ID: {masked_id}")
         print(f"[dry-run] Week: {from_date} to {to_date}")
-        print(f"[dry-run] Would fetch worklogs from Tempo API")
-        print(f"[dry-run] Would fetch approval status from Tempo API")
-        print(f"[dry-run] Would show nag popup")
-        print(f"[dry-run] Would sleep {CHECK_INTERVAL_SECONDS}s then repeat indefinitely")
+        show_nag_popup(0.0, "OPEN", from_date, to_date)
         return
 
     check = 0
