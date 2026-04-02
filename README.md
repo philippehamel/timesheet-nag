@@ -2,6 +2,8 @@
 
 Checks Tempo (Jira) for last week's logged hours and shows a popup dialog every 5 minutes until your timesheet is filled and submitted.
 
+![Dialog window](dialog-window.png)
+
 ## Setup
 
 1. Create a virtual environment and install dependencies:
