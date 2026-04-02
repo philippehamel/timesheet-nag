@@ -127,52 +127,96 @@ class TestIsTimesheetComplete:
         assert timesheet_nag.is_timesheet_complete(20.0, "OPEN") is False
 
 
-class TestWriteNagFile:
-    def test_writes_file(self, tmp_path: Path) -> None:
-        nag_file = tmp_path / "nag.txt"
-        with patch.object(timesheet_nag, "NAG_FILE", nag_file):
-            timesheet_nag.write_nag_file(32.5, "OPEN", "2026-03-23", "2026-03-29")
-        content = nag_file.read_text()
-        assert "32.5" in content
-        assert "40.0" in content
-        assert "OPEN" in content
-        assert "2026-03-23" in content
+class TestShowNagPopup:
+    def test_shows_warning(self) -> None:
+        mock_tk = MagicMock()
+        mock_root = MagicMock()
+        mock_tk.Tk.return_value = mock_root
+
+        with patch.dict("sys.modules", {"tkinter": mock_tk, "tkinter.messagebox": mock_tk.messagebox}):
+            timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+
+        mock_tk.messagebox.showwarning.assert_called_once()
+        title, message = mock_tk.messagebox.showwarning.call_args[0]
+        assert title == "FILL YOUR TIMESHEET!"
+        assert "32.5" in message
+        assert "40.0" in message
+        assert "2026-03-23" in message
+        mock_root.destroy.assert_called_once()
+
+    def test_notify_send_fallback(self) -> None:
+        mock_result = MagicMock()
+        mock_result.returncode = 0
+        with patch.dict("sys.modules", {"tkinter": None}):
+            with patch("subprocess.run", return_value=mock_result) as mock_run:
+                timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+        mock_run.assert_called_once()
+        args = mock_run.call_args[0][0]
+        assert args[0] == "notify-send"
+        assert "--urgency=critical" in args
+        assert "FILL YOUR TIMESHEET!" in args
+
+    def test_notify_send_failure_falls_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
+        with patch.dict("sys.modules", {"tkinter": None}):
+            with patch("subprocess.run", side_effect=FileNotFoundError):
+                timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+        err = capsys.readouterr().err
+        assert "falling back to stderr" in err
+        assert "32.5" in err
+        assert "2026-03-23" in err
+
+    def test_notify_send_nonzero_falls_to_stderr(self, capsys: pytest.CaptureFixture[str]) -> None:
+        mock_result = MagicMock()
+        mock_result.returncode = 1
+        with patch.dict("sys.modules", {"tkinter": None}):
+            with patch("subprocess.run", return_value=mock_result):
+                timesheet_nag.show_nag_popup(32.5, "OPEN", "2026-03-23", "2026-03-29")
+        err = capsys.readouterr().err
+        assert "falling back to stderr" in err
+        assert "32.5" in err
+
+    def test_root_destroyed(self) -> None:
+        mock_tk = MagicMock()
+        mock_root = MagicMock()
+        mock_tk.Tk.return_value = mock_root
+
+        with patch.dict("sys.modules", {"tkinter": mock_tk, "tkinter.messagebox": mock_tk.messagebox}):
+            timesheet_nag.show_nag_popup(40.0, "APPROVED", "2026-03-23", "2026-03-29")
+
+        mock_root.withdraw.assert_called_once()
+        mock_root.attributes.assert_called_once_with("-topmost", True)
+        mock_root.destroy.assert_called_once()
 
 
 class TestMain:
     @patch("timesheet_nag.time.sleep")
-    @patch("timesheet_nag.open_nag_file")
-    @patch("timesheet_nag.write_nag_file")
+    @patch("timesheet_nag.show_nag_popup")
     @patch("timesheet_nag.fetch_approval_status", return_value="APPROVED")
     @patch("timesheet_nag.fetch_logged_hours", return_value=40.0)
     @patch("timesheet_nag.load_config", return_value=("tok", "acc"))
     def test_stops_when_complete(
         self, _cfg: MagicMock, _hours: MagicMock, _status: MagicMock,
-        mock_write: MagicMock, mock_open: MagicMock, mock_sleep: MagicMock,
+        mock_popup: MagicMock, mock_sleep: MagicMock,
     ) -> None:
         timesheet_nag.main([])
-        mock_write.assert_not_called()
-        mock_open.assert_not_called()
+        mock_popup.assert_not_called()
         mock_sleep.assert_not_called()
 
     @patch("timesheet_nag.time.sleep")
-    @patch("timesheet_nag.open_nag_file")
-    @patch("timesheet_nag.write_nag_file")
+    @patch("timesheet_nag.show_nag_popup")
     @patch("timesheet_nag.fetch_approval_status", side_effect=["OPEN", "APPROVED"])
     @patch("timesheet_nag.fetch_logged_hours", side_effect=[30.0, 40.0])
     @patch("timesheet_nag.load_config", return_value=("tok", "acc"))
     def test_stops_when_filled_on_second_check(
         self, _cfg: MagicMock, _hours: MagicMock, _status: MagicMock,
-        mock_write: MagicMock, mock_open: MagicMock, mock_sleep: MagicMock,
+        mock_popup: MagicMock, mock_sleep: MagicMock,
     ) -> None:
         timesheet_nag.main([])
-        assert mock_write.call_count == 1
-        assert mock_open.call_count == 1
+        assert mock_popup.call_count == 1
         assert mock_sleep.call_count == 1
 
     @patch("timesheet_nag.time.sleep")
-    @patch("timesheet_nag.open_nag_file")
-    @patch("timesheet_nag.write_nag_file")
+    @patch("timesheet_nag.show_nag_popup")
     @patch("timesheet_nag.fetch_approval_status", return_value="APPROVED")
     @patch("timesheet_nag.fetch_logged_hours", side_effect=[
         requests.RequestException("network"),
@@ -182,12 +226,27 @@ class TestMain:
     @patch("timesheet_nag.load_config", return_value=("tok", "acc"))
     def test_api_error_skips_and_retries(
         self, _cfg: MagicMock, _hours: MagicMock, _status: MagicMock,
-        mock_write: MagicMock, mock_open: MagicMock, mock_sleep: MagicMock,
+        mock_popup: MagicMock, mock_sleep: MagicMock,
     ) -> None:
         timesheet_nag.main([])
-        mock_write.assert_not_called()
-        mock_open.assert_not_called()
+        mock_popup.assert_not_called()
         assert mock_sleep.call_count == 2
+
+    @patch("timesheet_nag.time.sleep")
+    @patch("timesheet_nag.show_nag_popup")
+    @patch("timesheet_nag.fetch_approval_status", return_value="APPROVED")
+    @patch("timesheet_nag.load_config", return_value=("tok", "acc"))
+    def test_4xx_error_exits_immediately(
+        self, _cfg: MagicMock, _status: MagicMock,
+        mock_popup: MagicMock, mock_sleep: MagicMock,
+    ) -> None:
+        resp = MagicMock()
+        resp.status_code = 401
+        with patch("timesheet_nag.fetch_logged_hours", side_effect=requests.HTTPError(response=resp)):
+            with pytest.raises(SystemExit):
+                timesheet_nag.main([])
+        mock_popup.assert_not_called()
+        mock_sleep.assert_not_called()
 
 
 class TestLoadConfig:
@@ -227,6 +286,7 @@ class TestLoadConfig:
                 timesheet_nag.load_config()
 
 
+
 class TestParseArgs:
     def test_defaults(self) -> None:
         args = timesheet_nag.parse_args([])
@@ -247,35 +307,31 @@ class TestParseArgs:
 
 
 class TestDryRun:
-    @patch("timesheet_nag.open_nag_file")
-    @patch("timesheet_nag.write_nag_file")
+    @patch("timesheet_nag.show_nag_popup")
     @patch("timesheet_nag.fetch_approval_status")
     @patch("timesheet_nag.fetch_logged_hours")
     @patch("timesheet_nag.load_config", return_value=("tok", "account123"))
     def test_dry_run_skips_api_and_nag(
         self, _cfg: MagicMock, mock_hours: MagicMock, mock_status: MagicMock,
-        mock_write: MagicMock, mock_open: MagicMock, capsys: pytest.CaptureFixture[str],
+        mock_popup: MagicMock, capsys: pytest.CaptureFixture[str],
     ) -> None:
         timesheet_nag.main(["--dry-run"])
         mock_hours.assert_not_called()
         mock_status.assert_not_called()
-        mock_write.assert_not_called()
-        mock_open.assert_not_called()
+        mock_popup.assert_not_called()
         output = capsys.readouterr().out
         assert "[dry-run]" in output
         assert "acc***" in output
         assert "Would fetch worklogs" in output
 
     @patch("timesheet_nag.time.sleep")
-    @patch("timesheet_nag.open_nag_file")
-    @patch("timesheet_nag.write_nag_file")
+    @patch("timesheet_nag.show_nag_popup")
     @patch("timesheet_nag.fetch_approval_status", return_value="APPROVED")
     @patch("timesheet_nag.fetch_logged_hours", return_value=40.0)
     @patch("timesheet_nag.load_config", return_value=("tok", "acc"))
     def test_no_flag_still_works(
         self, _cfg: MagicMock, _hours: MagicMock, _status: MagicMock,
-        mock_write: MagicMock, mock_open: MagicMock, mock_sleep: MagicMock,
+        mock_popup: MagicMock, mock_sleep: MagicMock,
     ) -> None:
         timesheet_nag.main([])
-        mock_write.assert_not_called()
-        mock_open.assert_not_called()
+        mock_popup.assert_not_called()

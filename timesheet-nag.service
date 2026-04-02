@@ -2,7 +2,9 @@
 Description=Check Tempo timesheet and nag if incomplete
 
 [Service]
-Type=oneshot
-ExecStart=/usr/bin/python3 __SCRIPT_DIR__/timesheet_nag.py
-PassEnvironment=DISPLAY DBUS_SESSION_BUS_ADDRESS
+Type=simple
+ExecStart=__SCRIPT_DIR__/.venv/bin/python3 __SCRIPT_DIR__/timesheet_nag.py
+Restart=on-failure
+RestartSec=60
+PassEnvironment=DISPLAY DBUS_SESSION_BUS_ADDRESS XAUTHORITY WAYLAND_DISPLAY
 Environment=DISPLAY=:0

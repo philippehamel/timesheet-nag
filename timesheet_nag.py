@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 
 import argparse
-import os
-import subprocess
 import sys
 import time
 from datetime import date, timedelta
@@ -13,7 +11,6 @@ import requests
 TEMPO_BASE_URL = "https://api.tempo.io/4"
 EXPECTED_HOURS = 40
 CHECK_INTERVAL_SECONDS = 300
-NAG_FILE = Path("/tmp/FILL_YOUR_TIMESHEET.txt")
 TOKEN_FILE = Path.home() / ".tempo_token"
 COMPLETE_STATUSES = {"WAITING_FOR_APPROVAL", "APPROVED"}
 
@@ -23,7 +20,8 @@ def load_config() -> tuple[str, str]:
         print(f"Error: {TOKEN_FILE} not found. Create it with:", file=sys.stderr)
         print(f"  echo 'YOUR_TOKEN' > {TOKEN_FILE}", file=sys.stderr)
         print(f"  echo 'YOUR_ACCOUNT_ID' >> {TOKEN_FILE}", file=sys.stderr)
-        print(f"  chmod 600 {TOKEN_FILE}", file=sys.stderr)
+        if sys.platform != "win32":
+            print(f"  chmod 600 {TOKEN_FILE}", file=sys.stderr)
         sys.exit(1)
     lines = TOKEN_FILE.read_text().strip().splitlines()
     if len(lines) < 2:
@@ -64,7 +62,7 @@ def fetch_logged_hours(token: str, account_id: str, from_date: str, to_date: str
         for worklog in data.get("results", []):
             total_seconds += worklog.get("timeSpentSeconds", 0)
         next_url = data.get("metadata", {}).get("next", None)
-        if next_url and not next_url.startswith("https://"):
+        if next_url and not next_url.startswith("https://api.tempo.io/"):
             print(f"Warning: ignoring unexpected pagination URL: {next_url}", file=sys.stderr)
             next_url = None
         url = next_url
@@ -86,32 +84,55 @@ def is_timesheet_complete(hours: float, status: str) -> bool:
     return hours >= EXPECTED_HOURS and status in COMPLETE_STATUSES
 
 
-def write_nag_file(hours: float, status: str, from_date: str, to_date: str) -> None:
+def show_nag_popup(hours: float, status: str, from_date: str, to_date: str) -> None:
     status_label = {
         "OPEN": "OPEN (not submitted)",
         "WAITING_FOR_APPROVAL": "SUBMITTED (waiting for approval)",
         "APPROVED": "APPROVED",
     }.get(status, status)
 
-    fd = os.open(str(NAG_FILE), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as f:
-        f.write(
-            f"{'=' * 50}\n"
-            f"     FILL YOUR TIMESHEET!\n"
-            f"{'=' * 50}\n\n"
-            f"Week: {from_date} to {to_date}\n"
-            f"Logged: {hours:.1f} / {EXPECTED_HOURS:.1f} hours\n"
-            f"Status: {status_label}\n\n"
-            f"Go to Tempo and log your hours NOW.\n"
-            f"This message will keep appearing every 5 minutes.\n"
-        )
+    message = (
+        f"Week: {from_date} to {to_date}\n"
+        f"Logged: {hours:.1f} / {EXPECTED_HOURS:.1f} hours\n"
+        f"Status: {status_label}\n\n"
+        f"Go to Tempo and log your hours NOW.\n"
+        f"This message will keep appearing every 5 minutes."
+    )
 
-
-def open_nag_file() -> None:
     try:
-        subprocess.Popen(["xdg-open", str(NAG_FILE)], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except FileNotFoundError:
-        print("Warning: xdg-open not found, cannot open nag file.", file=sys.stderr)
+        import tkinter
+        from tkinter import messagebox
+
+        root = tkinter.Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        messagebox.showwarning("FILL YOUR TIMESHEET!", message)
+        root.destroy()
+        return
+    except Exception:
+        pass
+
+    try:
+        import subprocess
+
+        result = subprocess.run(
+            [
+                "notify-send",
+                "--urgency=critical",
+                "--app-name=Timesheet Nag",
+                "FILL YOUR TIMESHEET!",
+                message,
+            ],
+            capture_output=True,
+            timeout=5,
+        )
+        if result.returncode == 0:
+            return
+    except Exception:
+        pass
+
+    print("Warning: all notification methods failed, falling back to stderr", file=sys.stderr)
+    print(message, file=sys.stderr)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -145,8 +166,7 @@ def main(argv: list[str] | None = None) -> None:
         print(f"[dry-run] Week: {from_date} to {to_date}")
         print(f"[dry-run] Would fetch worklogs from Tempo API")
         print(f"[dry-run] Would fetch approval status from Tempo API")
-        print(f"[dry-run] Would write nag file to {NAG_FILE}")
-        print(f"[dry-run] Would open nag file with xdg-open")
+        print(f"[dry-run] Would show nag popup")
         print(f"[dry-run] Would sleep {CHECK_INTERVAL_SECONDS}s then repeat indefinitely")
         return
 
@@ -156,6 +176,13 @@ def main(argv: list[str] | None = None) -> None:
         try:
             hours = fetch_logged_hours(token, account_id, from_date, to_date)
             status = fetch_approval_status(token, account_id, from_date, to_date)
+        except requests.HTTPError as e:
+            if e.response is not None and 400 <= e.response.status_code < 500:
+                print(f"Error: API returned {e.response.status_code} — check your token and account ID.", file=sys.stderr)
+                sys.exit(1)
+            print(f"Warning: API error (attempt {check}): {e}", file=sys.stderr)
+            time.sleep(CHECK_INTERVAL_SECONDS)
+            continue
         except (requests.RequestException, KeyError, ValueError) as e:
             print(f"Warning: API error (attempt {check}): {e}", file=sys.stderr)
             time.sleep(CHECK_INTERVAL_SECONDS)
@@ -166,8 +193,7 @@ def main(argv: list[str] | None = None) -> None:
             return
 
         print(f"Check {check}: {hours:.1f}h, status={status}. Nagging...")
-        write_nag_file(hours, status, from_date, to_date)
-        open_nag_file()
+        show_nag_popup(hours, status, from_date, to_date)
         time.sleep(CHECK_INTERVAL_SECONDS)
 
 

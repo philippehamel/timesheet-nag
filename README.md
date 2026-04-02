@@ -1,6 +1,6 @@
 # Timesheet Nag
 
-Checks Tempo (Jira) for last week's logged hours and opens an annoying reminder every 5 minutes until your timesheet is filled and submitted.
+Checks Tempo (Jira) for last week's logged hours and shows a popup dialog every 5 minutes until your timesheet is filled and submitted.
 
 ## Setup
 
@@ -12,12 +12,18 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
+On Ubuntu, install tkinter if not already present:
+
+```bash
+sudo apt install python3-tk
+```
+
 2. Create your config file with your Tempo API token and Jira account ID:
 
 ```bash
 echo 'YOUR_TEMPO_TOKEN' > ~/.tempo_token
 echo 'YOUR_ACCOUNT_ID' >> ~/.tempo_token
-chmod 600 ~/.tempo_token
+chmod 600 ~/.tempo_token   # Linux/macOS only
 ```
 
 3. Test it works:
@@ -26,18 +32,49 @@ chmod 600 ~/.tempo_token
 python timesheet_nag.py --dry-run
 ```
 
-## Install as systemd timer
+## Install as scheduled task
 
-This sets up a user timer that runs every Monday at 9:00 AM:
+Each platform has its own installer that schedules the script to run every Monday at 9:00 AM.
+
+### Linux (systemd)
 
 ```bash
 ./install.sh
+systemctl --user status timesheet-nag.timer
 ```
 
-Check timer status:
+### macOS (launchd)
 
 ```bash
-systemctl --user status timesheet-nag.timer
+./install_macos.sh
+launchctl list | grep timesheet
+```
+
+### Windows (Task Scheduler)
+
+```bat
+install_windows.bat
+schtasks /query /tn "TimesheetNag"
+```
+
+## Uninstall
+
+### Linux
+
+```bash
+./uninstall.sh
+```
+
+### macOS
+
+```bash
+./uninstall_macos.sh
+```
+
+### Windows
+
+```bat
+uninstall_windows.bat
 ```
 
 ## Usage
